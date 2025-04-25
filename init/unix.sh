@@ -366,7 +366,8 @@ ____exec_upscale_program() {
                 -s "$scale" \
                 -m "${repo}/models" \
                 -n "$model" \
-                -f "$format"
+                -f "$format" \
+                -g "$3"
 
 
         return $?
@@ -402,6 +403,7 @@ ___upscale_a_frame_in_parallel() {
         # ARG3: working flag path
         # ARG4: done flag path
         # ARG5: error flag path
+        # ARG6: gpu ids
 
 
         # denote working status
@@ -409,7 +411,7 @@ ___upscale_a_frame_in_parallel() {
 
 
         # perform upscale
-        ____exec_upscale_program "$1" "$2"
+        ____exec_upscale_program "$1" "$2" "$6"
         if [ $? -ne 0 ]; then
                 mkdir -p "$5"
                 rm -rf "$3"
@@ -481,41 +483,56 @@ __setup_video_workspace() {
         # setup variables
         workspace="${subject_dir}/${subject_name}-${subject_suffix}_workspace"
         control="${workspace}/control.sh"
+        if [ -f $control ]
+        then
+                source $control
+        fi
 
-
-        # analyze input video and initialize sentinel variables
-        video_codec="$(ffprobe -v error \
-                        -select_streams v:0 \
-                        -show_entries stream=codec_name \
-                        -of default=noprint_wrappers=1:nokey=1 \
-                        "$source_file"
-        )"
-        frame_rate="$(
-                ffprobe -v error \
-                        -select_streams v \
-                        -of default=noprint_wrappers=1:nokey=1 \
-                        -show_entries stream=r_frame_rate \
-                        "$source_file"
-        )"
-        total_frames="$(($(
-                ffprobe -v error \
-                        -select_streams v:0 \
-                        -count_frames \
-                        -show_entries stream=nb_read_frames \
-                        -of default=nokey=1:noprint_wrappers=1 \
-                        "$source_file"
-        ) - 1))" # NOTE: system uses 0 as a starting point so we -1 out
-        input_frame_size="$(
-                ffprobe \
-                        -v error \
-                        -select_streams v:0 \
-                        -show_entries stream=width,height \
-                        -of csv=s=x:p=0 \
-                        "$source_file"
-        )"
+        if [ -z $video_codec ]
+        then
+                # analyze input video and initialize sentinel variables
+                video_codec="$(ffprobe -v error \
+                                -select_streams v:0 \
+                                -show_entries stream=codec_name \
+                                -of default=noprint_wrappers=1:nokey=1 \
+                                "$source_file"
+                )"
+        fi
+        if [ -z $frame_rate ]
+        then
+                frame_rate="$(
+                        ffprobe -v error \
+                                -select_streams v \
+                                -of default=noprint_wrappers=1:nokey=1 \
+                                -show_entries stream=r_frame_rate \
+                                "$source_file"
+                )"
+        fi
+        if [ -z $total_frames ]
+        then
+                total_frames="$(($(
+                        ffprobe -v error \
+                                -select_streams v:0 \
+                                -count_frames \
+                                -show_entries stream=nb_read_frames \
+                                -of default=nokey=1:noprint_wrappers=1 \
+                                "$source_file"
+                ) - 1))" # NOTE: system uses 0 as a starting point so we -1 out
+        fi
+        if [ -z $input_frame_size ]
+        then
+                input_frame_size="$(
+                        ffprobe \
+                                -v error \
+                                -select_streams v:0 \
+                                -show_entries stream=width,height \
+                                -of csv=s=x:p=0 \
+                                "$source_file"
+                )"
+        fi
         current_frame=0
         phase=0
-
+        pid=$(( ( RANDOM % 10 )  + 1 ))
 
         # recover from last status for job continuation if available
         if [ -f "$control" ]; then
@@ -539,15 +556,17 @@ __setup_video_workspace() {
 
 
         _print_status info """
-Video Name     : ${subject_name}.${subject_ext}
-Video Codec    : ${video_codec}
-Input Frame    : ${input_frame_size}
+Video Name                : ${subject_name}.${subject_ext}
+Video Codec               : ${video_codec}
+Input Frame               : ${input_frame_size}
 
-Frame Rate     : ${frame_rate}
-Total Frames   : $((total_frames + 1))
-Work Phase     : ${phase}
+Frame Rate                : ${frame_rate}
+Total Frames              : $((total_frames + 1))
+Work Phase                : ${phase}
 
-Total Threads  : ${parallel}
+Frame Upscaling Threads   : ${parallel}
+Frame Extraction Threads  : ${parallelframeextraction}
+GPU Ids                   : ${gpu_ids}
 
 
 """
@@ -566,45 +585,30 @@ __generate_frames() {
                 return 0
         fi
 
+        if [ -z $parallelframeextraction ]
+        then
+                parallelframeextraction=1
+        fi
 
-        # generate each frame selectively for highest quality extraction.
-        while [ $current_frame -le $total_frames ]; do
-                # prepare output
-                output="$(___generate_frame_input_name "$current_frame")"
-                _print_status info "Extracting frame ${current_frame}/$total_frames...\r"
+        for thread in $(seq 1 $parallelframeextraction)
+        do
+                __generate_frames_in_parallel $parallelframeextraction $thread&
+        done
 
-                # extract frame
-                ffmpeg -y \
-                        -hide_banner \
-                        -loglevel error \
-                        -thread_queue_size 4096 \
-                        -i "$source_file" \
-                        -vf select="'eq(n\,${current_frame})'" \
-                        -vframes 1 \
-                        "$output" \
-                &> /dev/null
-                if [ $? -ne 0 ]; then
-                        _print_status error
-                        return 1
+        sleep 1
+
+        while true; do
+                # Zähle die Anzahl der laufenden Threads (durch Zählen der Dateien)
+                anzahl_threads=$(ls /tmp/"$pid"frame_extraction_thread* | wc -l)
+
+                # Wenn keine Threads mehr laufen, beende die Schleife
+                if [ "$anzahl_threads" -eq 0 ]; then
+                        break
                 fi
 
-                # increase frame count
-                current_frame=$(($current_frame + 1))
+                # Warte kurz, bevor erneut geprüft wird (z.B. 0.1 Sekunden)
+                sleep 1
         done
-        unset input output
-        _print_status info "\n"
-
-
-        # remove all done flags
-        current_frame=0
-        while [ $current_frame -lt $total_frames ]; do
-                input="$(___generate_frame_done_name "$current_frame")"
-
-                rm -rf "$input" &> /dev/null
-
-                current_frame=$(($current_frame + 1))
-        done
-        unset input current_frame
 
 
         # save settings to control file in case of future continuation
@@ -617,6 +621,91 @@ __generate_frames() {
 
         # report and return
         _print_status info "COMPLETED\n\n"
+        return 0
+}
+
+__generate_frames_in_parallel() {
+        # $1 is how many parallel executions
+        # $2 is threadnumber
+        howmanythreads=$1
+        threadnumber=$2
+
+        _print_status info "PHASE 1 - FRAME EXTRACTION (thread $threadnumber)\n"
+
+
+        # skip if it was marked completed.
+        if [ $phase -ge 1 ]; then
+                _print_status info "COMPLETED\n\n"
+                return 0
+        fi
+
+        # write status of thread
+        echo "running" > /tmp/"$pid"frame_extraction_thread$threadnumber
+
+        if [ "$threadnumber" = "$howmanythreads" ]
+        then
+                total_frames_thread=$((total_frames))
+        else
+                total_frames_thread=$(($(($total_frames / $howmanythreads)) * $threadnumber))
+        fi
+        current_frame_thread=$(($total_frames_thread - $((total_frames / $howmanythreads))))
+
+        # generate each frame selectively for highest quality extraction.
+        while [ $current_frame_thread -le $total_frames_thread ]; do
+                # prepare output
+                output="$(___generate_frame_input_name "$current_frame_thread")"
+                _print_status info "Extracting frame (thread $threadnumber) ${current_frame_thread}/$total_frames_thread...\r"
+
+                # extract frame
+                if [ -f "$output" ]
+                then
+                        _print_status info "Skipping frame (thread $threadnumber) ${current_frame_thread} ...                                          \r"
+                else
+                        ffmpeg -y \
+                                -hide_banner \
+                                -loglevel error \
+                                -thread_queue_size 4096 \
+                                -i "$source_file" \
+                                -vf select="'eq(n\,${current_frame_thread})'" \
+                                -vframes 1 \
+                                "$output" \
+                        &> /dev/null
+                fi
+                if [ $? -ne 0 ]; then
+                        _print_status error
+                        return 1
+                fi
+
+                # increase frame count
+                current_frame_thread=$(($current_frame_thread + 1))
+        done
+        unset input output
+        _print_status info "\n"
+
+
+        # remove all done flags
+        current_frame_thread=0
+        while [ $current_frame_thread -lt $total_frames_thread ]; do
+                input="$(___generate_frame_done_name "$current_frame_thread")"
+
+                rm -rf "$input" &> /dev/null
+
+                current_frame_thread=$(($current_frame_thread + 1))
+        done
+        unset input current_frame_thread
+
+
+        # save settings to control file in case of future continuation
+        ____save_workspace_controller 2
+        if [ $? -ne 0 ]; then
+                 _print_status error "\n"
+                return 1
+        fi
+
+
+        # report and return
+        rm /tmp/"$pid"frame_extraction_thread$threadnumber
+        _print_status info "\nCOMPLETED (thread $threadnumber)                                \n\n"
         return 0
 }
 
@@ -647,6 +736,22 @@ __upscale_frames() {
         current_frame=0
         done_frame=0
         working_frame=0
+
+                # Use multiple GPUs if gpu-ids is given
+                if [ -z "$gpu_ids" ]
+                then
+                        gpu_ids=0
+                fi
+
+                gpu_array=()
+                IFS=','
+                for id in $gpu_ids; do
+                        gpu_array+=("$id")
+                done
+                unset IFS
+
+                id=0
+
         while [ $current_frame -le $total_frames ]; do
                 input="$(___generate_frame_input_name "$current_frame")"
                 output="$(___generate_frame_output_name "$current_frame")"
@@ -694,8 +799,16 @@ __upscale_frames() {
                                                         "$output" \
                                                         "$working" \
                                                         "$completed" \
-                                                        "$error"
+                                                        "$error" \
+                                                        "${gpu_array[$id]}"
                         } &
+
+                        if [ $id -lt $((${#gpu_array[@]} - 1 )) ]
+                        then
+                                ((id++))
+                        else
+                                id=0
+                        fi
 
                         working_frame=$(($working_frame + 1))
                 fi
@@ -853,6 +966,18 @@ main() {
                         ;;
                 --video|-vd)
                         video_mode=1
+                        ;;
+                --gpu-ids)
+                        if [ "$2" != "" ] && [ "$(printf "%.1s" "$2")" != "-" ]; then
+                                gpu_ids="$2"
+                                shift 1
+                        fi
+                        ;;
+                --parallelframeextraction|-pfe)
+                        if [ "$2" != "" ] && [ "$(printf "%.1s" "$2")" != "-" ]; then
+                                parallelframeextraction="$2"
+                                shift 1
+                        fi
                         ;;
                 --parallel|-pa)
                         if [ "$2" != "" ] && [ "$(printf "%.1s" "$2")" != "-" ]; then
