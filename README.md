@@ -1,3 +1,6 @@
+This is a fork! Do not use it. Instead go to https://github.com/hollowaykeanho/Upscaler
+
+
 # Holloway's Upscaler - Image & Video
 [![Holloway's Upscaler](resources/logos/logo-1200x630.svg)](https://github.com/hollowaykeanho/Upscaler)
 This project is a consolidation of various compiled open-source AI image/video
