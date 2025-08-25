@@ -199,7 +199,19 @@ _check_os() {
 }
 
 _check_arch() {
-        program="${program}-amd64"
+
+    arch="$(uname -m)"
+
+    case "$arch" in
+        x86_64)
+            architecture="amd64"
+            ;;
+        aarch64)
+            architecture="arm64"
+            ;;
+
+    esac
+        program="${program}-$architecture"
 
 
         return 0
