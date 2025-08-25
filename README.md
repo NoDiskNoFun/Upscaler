@@ -107,7 +107,7 @@ Here are the basic user manuals:
 ### Install
 There are different ways of installing this program depending on your interested
 versions:
-
+Update unix.sh
 
 #### `>= v0.6.0`
 You can download the latest version of the `upscaler-[VERSION].zip`
@@ -362,6 +362,12 @@ repository. These data serves few purposes:
 | Version      | Sample 1 (Video)  |
 |:-------------|:------------------|
 | `master`     | `4947 seconds`    |
+
+#### BredOS-ARM64; CIX P1 CD8180; 32GB RAM; 12GB VRAM; NVIDIA RTX 3060
+
+| Version      | Sample 1 (Video)  |
+|:-------------|:------------------|
+| `master`     | `5380 seconds`    |
 
 
 ## Commands Help
